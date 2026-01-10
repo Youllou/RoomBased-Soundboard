@@ -1,10 +1,20 @@
-import * as React from 'react';
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Volume2, Users, LogIn, Copy, Check } from 'lucide-react';
 
 export default function RoomSoundboard() {
     const [roomId, setRoomId] = useState('');
     const [currentRoom, setCurrentRoom] = useState(null);
+
+    // Check URL for room code on mount
+    useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomFromUrl = urlParams.get('room');
+
+        if (roomFromUrl) {
+            setRoomId(roomFromUrl);
+            joinRoom(roomFromUrl);
+        }
+    }, []);
     const [sounds, setSounds] = useState([]);
     const [userCount, setUserCount] = useState(0);
     const [copied, setCopied] = useState(false);
@@ -15,9 +25,9 @@ export default function RoomSoundboard() {
     const reconnectTimeoutRef = useRef(null);
 
     // API URLs
-    const API_URL = '';
-    const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
-    
+    const API_URL = 'http://localhost:8000';
+    const WS_URL = 'ws://localhost:8000';
+
     useEffect(() => {
         // Fetch sound metadata only (no audio files yet)
         fetch(`${API_URL}/api/sounds`)
@@ -85,7 +95,7 @@ export default function RoomSoundboard() {
         wsRef.current = ws;
     };
 
-    const loadAndPlaySound = async (soundId): Promise<void> => {
+    const loadAndPlaySound = async (soundId) => {
         // Check if audio is already loaded
         if (audioBufferRef.current[soundId]) {
             playSound(soundId);
@@ -130,6 +140,12 @@ export default function RoomSoundboard() {
         if (!room) return;
 
         setCurrentRoom(room);
+
+        // Update URL with room code
+        const url = new URL(window.location);
+        url.searchParams.set('room', room);
+        window.history.pushState({}, '', url);
+
         connectWebSocket(room);
     };
 
@@ -145,6 +161,11 @@ export default function RoomSoundboard() {
         setCurrentRoom(null);
         setUserCount(0);
         setConnectionStatus('disconnected');
+
+        // Remove room from URL
+        const url = new URL(window.location);
+        url.searchParams.delete('room');
+        window.history.pushState({}, '', url);
     };
 
     const handlePlaySound = (soundId) => {
@@ -161,7 +182,11 @@ export default function RoomSoundboard() {
     };
 
     const copyRoomLink = () => {
-        navigator.clipboard.writeText(currentRoom);
+        const url = new URL(window.location);
+        url.searchParams.set('room', currentRoom);
+        const fullUrl = url.toString();
+
+        navigator.clipboard.writeText(fullUrl);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
     };
@@ -266,7 +291,7 @@ export default function RoomSoundboard() {
                                 className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition flex items-center gap-2"
                             >
                                 {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                                {copied ? 'Copied!' : 'Copy Code'}
+                                {copied ? 'Copied!' : 'Copy Link'}
                             </button>
                             <button
                                 onClick={leaveRoom}
@@ -294,7 +319,7 @@ export default function RoomSoundboard() {
 
                 <div className="mt-6 bg-white/10 backdrop-blur-lg rounded-xl p-4 border border-white/20">
                     <p className="text-purple-200 text-sm text-center">
-                        💡 Share the room code with friends to play sounds together in real-time!
+                        💡 Copy the link to share this room with friends - they'll join automatically!
                     </p>
                 </div>
             </div>
