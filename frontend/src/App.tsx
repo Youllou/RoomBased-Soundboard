@@ -15,9 +15,9 @@ export default function RoomSoundboard() {
     const reconnectTimeoutRef = useRef(null);
 
     // API URLs
-    const API_URL = 'http://localhost:8080';
-    const WS_URL = 'ws://localhost:8080';
-
+    const API_URL = '';
+    const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    
     useEffect(() => {
         // Fetch sound metadata only (no audio files yet)
         fetch(`${API_URL}/api/sounds`)

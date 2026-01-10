@@ -4,7 +4,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "5174:8080"
     volumes:
       - ./backend/sounds:/app/sounds
       - ./backend/soundboard.db:/app/soundboard.db
@@ -25,6 +25,7 @@ services:
     restart: unless-stopped
     networks:
       - soundboard-network
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
 
 networks:
   soundboard-network:

@@ -11,5 +11,4 @@ build
 .venv
 env
 .env
-*.db
 sounds/*
