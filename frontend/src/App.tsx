@@ -2,39 +2,30 @@ import * as React from 'react';
 import { useState, useEffect, useRef } from 'react';
 import { Volume2, Users, LogIn, Copy, Check } from 'lucide-react';
 
-type soundType = {
-    id: string;
-    name: string;
-    url: string;
-}
-
 export default function RoomSoundboard() {
     const [roomId, setRoomId] = useState('');
     const [currentRoom, setCurrentRoom] = useState(null);
-    const [sounds, setSounds] = useState<Array<soundType>>([]);
+    const [sounds, setSounds] = useState([]);
     const [userCount, setUserCount] = useState(0);
     const [copied, setCopied] = useState(false);
     const [connectionStatus, setConnectionStatus] = useState('disconnected');
     const wsRef = useRef(null);
     const audioRefs = useRef({});
+    const audioBufferRef = useRef({});
     const reconnectTimeoutRef = useRef(null);
 
-    // WebSocket URL - change this to your production URL
+    // API URLs
+    const API_URL = 'http://localhost:8080';
     const WS_URL = 'ws://localhost:8080';
 
     useEffect(() => {
-        // Fetch available sounds
-        fetch('https://cdn.freesound.org/previews/448/448080_5121236-lq.mp3')
-            .then(() => {
-                setSounds([
-                    { id: 'airhorn', name: 'Air Horn', url: 'https://cdn.freesound.org/previews/448/448080_5121236-lq.mp3' },
-                    { id: 'applause', name: 'Applause', url: 'https://cdn.freesound.org/previews/397/397353_5121236-lq.mp3' },
-                    { id: 'drumroll', name: 'Drum Roll', url: 'https://cdn.freesound.org/previews/566/566300_12368295-lq.mp3' },
-                    { id: 'laugh', name: 'Laugh', url: 'https://cdn.freesound.org/previews/387/387232_3508781-lq.mp3' },
-                    { id: 'woohoo', name: 'Woo Hoo', url: 'https://cdn.freesound.org/previews/142/142608_2615119-lq.mp3' },
-                    { id: 'sad', name: 'Sad Trombone', url: 'https://cdn.freesound.org/previews/447/447912_7037111-lq.mp3' },
-                ]);
-            });
+        // Fetch sound metadata only (no audio files yet)
+        fetch(`${API_URL}/api/sounds`)
+            .then(res => res.json())
+            .then(data => {
+                setSounds(data.sounds);
+            })
+            .catch(err => console.error('Failed to fetch sounds:', err));
 
         return () => {
             if (wsRef.current) {
@@ -64,7 +55,8 @@ export default function RoomSoundboard() {
                 const message = JSON.parse(event.data);
 
                 if (message.type === 'play_sound') {
-                    playSound(message.soundId);
+                    // Load and play sound when received via websocket
+                    loadAndPlaySound(message.soundId);
                 } else if (message.type === 'user_count') {
                     setUserCount(message.count);
                 }
@@ -82,7 +74,6 @@ export default function RoomSoundboard() {
             console.log('WebSocket disconnected');
             setConnectionStatus('disconnected');
 
-            // Attempt to reconnect after 3 seconds if we're still in a room
             if (currentRoom) {
                 reconnectTimeoutRef.current = setTimeout(() => {
                     console.log('Attempting to reconnect...');
@@ -94,7 +85,47 @@ export default function RoomSoundboard() {
         wsRef.current = ws;
     };
 
-    const joinRoom = (id = null) => {
+    const loadAndPlaySound = async (soundId): Promise<void> => {
+        // Check if audio is already loaded
+        if (audioBufferRef.current[soundId]) {
+            playSound(soundId);
+            return;
+        }
+
+        try {
+            // Fetch the audio file from backend
+            const response = await fetch(`${API_URL}/api/sounds/${soundId}/audio`);
+
+            if (!response.ok) {
+                console.error('Failed to load sound:', soundId);
+                return;
+            }
+
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+
+            // Create and cache audio element
+            const audio = new Audio(url);
+            audioRefs.current[soundId] = audio;
+            audioBufferRef.current[soundId] = true;
+
+            // Play the sound
+            audio.play().catch(err => console.error('Audio play failed:', err));
+
+        } catch (error) {
+            console.error('Error loading sound:', error);
+        }
+    };
+
+    const playSound = (soundId) => {
+        const audio = audioRefs.current[soundId];
+        if (audio) {
+            audio.currentTime = 0;
+            audio.play().catch(err => console.error('Audio play failed:', err));
+        }
+    };
+
+    const joinRoom = (id) => {
         const room = id || roomId;
         if (!room) return;
 
@@ -116,22 +147,11 @@ export default function RoomSoundboard() {
         setConnectionStatus('disconnected');
     };
 
-    const playSound = (soundId) => {
-        const sound = sounds.find(s => s.id === soundId);
-        if (!sound) return;
-
-        if (!audioRefs.current[soundId]) {
-            audioRefs.current[soundId] = new Audio(sound.url);
-        }
-
-        const audio = audioRefs.current[soundId];
-        audio.currentTime = 0;
-        audio.play().catch(err => console.error('Audio play failed:', err));
-    };
-
     const handlePlaySound = (soundId) => {
-        playSound(soundId);
+        // Load and play sound locally
+        loadAndPlaySound(soundId);
 
+        // Broadcast to other users in room
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({
                 type: 'play_sound',

@@ -1,0 +1,35 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/sounds:/app/sounds
+      - ./backend/soundboard.db:/app/soundboard.db
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped
+    networks:
+      - soundboard-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - soundboard-network
+
+networks:
+  soundboard-network:
+    driver: bridge
+
+volumes:
+  sounds:
+  database:

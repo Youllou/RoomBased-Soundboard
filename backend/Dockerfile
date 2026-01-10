@@ -1,4 +1,19 @@
-FROM ubuntu:latest
-LABEL authors="youllou"
+FROM python:3.11-slim
 
-ENTRYPOINT ["top", "-b"]
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY main.py .
+
+# Create sounds directory
+RUN mkdir -p sounds
+
+# Expose port
+EXPOSE 8080
+
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
