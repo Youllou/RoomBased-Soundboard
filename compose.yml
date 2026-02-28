@@ -1,3 +1,4 @@
+
 services:
   backend:
     build:
@@ -26,6 +27,18 @@ services:
     networks:
       - soundboard-network
     command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+
+  discord-bot:
+    build:
+      context: ./discord-bot
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    env_file:
+      - ./discord-bot/.env
+    restart: unless-stopped
+    networks:
+      - soundboard-network
 
 networks:
   soundboard-network:
