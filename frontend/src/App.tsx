@@ -321,6 +321,7 @@ export default function RoomSoundboard() {
                     <p className="text-purple-200 text-sm text-center">
                         💡 Copy the link to share this room with friends - they'll join automatically!
                     </p>
+                    <a className="text-purple-200 text-sm text-center" href="https://youllou.com"><p>made with 💜 by youllou</p></a>
                 </div>
             </div>
         </div>

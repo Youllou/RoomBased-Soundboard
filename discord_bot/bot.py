@@ -11,7 +11,7 @@ from typing import Optional
 load_dotenv()
 
 # Bot configuration
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 API_URL = os.getenv("API_URL", "http://localhost:8080")
 WS_URL = os.getenv("WS_URL", "ws://localhost:8080")
 
@@ -228,7 +228,7 @@ async def status_command(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        print("Error: DISCORD_BOT_TOKEN not set in .env file")
+        print("Error: DISCORD_TOKEN not set in .env file")
         exit(1)
     
     bot.run(DISCORD_TOKEN)

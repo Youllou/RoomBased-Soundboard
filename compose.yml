@@ -30,12 +30,12 @@ services:
 
   discord-bot:
     build:
-      context: ./discord-bot
-      dockerfile: Dockerfile
+      context: ./discord_bot
+      dockerfile: DockerFile
     depends_on:
       - backend
     env_file:
-      - ./discord-bot/.env
+      - ./discord_bot/.env
     restart: unless-stopped
     networks:
       - soundboard-network
