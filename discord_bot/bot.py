@@ -17,13 +17,13 @@ WS_URL = os.getenv("WS_URL", "ws://localhost:8080")
 
 # Store active connections per guild
 active_connections = {}
-
+print("test")
 class SoundboardBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        intents.guilds = True
         intents.message_content = True
         intents.voice_states = True
-        intents.presences = True
         super().__init__(command_prefix="!", intents=intents)
         
     async def setup_hook(self):
@@ -43,6 +43,9 @@ class SoundboardConnection:
         
     async def connect(self):
         """Connect to soundboard WebSocket"""
+        print("got in")
+        print(self.voice_client)
+        print(self.room_id)
         self.session = aiohttp.ClientSession()
         try:
             self.ws = await self.session.ws_connect(f"{WS_URL}/ws/{self.room_id}")
@@ -168,6 +171,7 @@ async def join_command(
     voice_channel = channel
     if not voice_channel:
         # Try to get user's current voice channel
+        print(interaction.user)
         if interaction.user.voice:
             voice_channel = interaction.user.voice.channel
         else:
@@ -176,8 +180,8 @@ async def join_command(
     
     try:
         # Connect to voice channel
-        voice_client = await voice_channel.connect()
-        
+        voice_client = await voice_channel.connect(reconnect=True)
+        print("connected to voice")
         # Create soundboard connection
         connection = SoundboardConnection(voice_client, room, interaction.guild.id)
         await connection.connect()
