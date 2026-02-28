@@ -158,7 +158,7 @@ async def join_command(
     
     # Defer the response as this might take a moment
     await interaction.response.defer()
-    
+
     # Check if already connected in this guild
     if interaction.guild.id in active_connections:
         await interaction.followup.send("❌ Already connected in this server. Use `/leave` first.")
