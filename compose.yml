@@ -39,6 +39,10 @@ services:
     restart: unless-stopped
     networks:
       - soundboard-network
+    develop:
+      watch:
+        - action: rebuild
+          path: ./discord_bot
 
 networks:
   soundboard-network:
