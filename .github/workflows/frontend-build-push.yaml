@@ -1,0 +1,25 @@
+name: Frontend docker build
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ "frontend/**" ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    uses: youllou/workflows/.github/workflows/build-push-ghcr.yaml@main
+    with:
+      container-name: roombased_soundboard-frontend
+      context: ./frontend
+      file: ./frontend/Dockerfile
+      branch: main
+    secrets:
+      GHCR_DEPLOY_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}

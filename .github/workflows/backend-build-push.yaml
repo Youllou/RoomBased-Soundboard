@@ -1,0 +1,25 @@
+name: Backend docker build
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ "backend/**" ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    uses: youllou/workflows/.github/workflows/build-push-ghcr.yaml@main
+    with:
+      container-name: roombased_soundboard-backend
+      context: ./backend
+      file: ./backend/Dockerfile
+      branch: main
+    secrets:
+      GHCR_DEPLOY_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}
