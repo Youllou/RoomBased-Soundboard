@@ -1,19 +1,21 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Depends, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Dict, Set, Optional
+from typing import Dict, Optional
 import asyncio
 import json
 import os
-import sqlite3
 import uuid
 from pathlib import Path
-from contextlib import contextmanager
-from dotenv import load_dotenv
-import redis.asyncio as redis
+from datetime import datetime
 
-# Load environment variables
+import asyncpg
+import aioboto3
+from botocore.exceptions import ClientError
+import redis.asyncio as redis
+from dotenv import load_dotenv
+
 load_dotenv()
 
 app = FastAPI()
@@ -26,62 +28,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create sounds directory if it doesn't exist
-SOUNDS_DIR = Path("sounds")
-SOUNDS_DIR.mkdir(exist_ok=True)
-
-# Database setup
-DB_PATH = "soundboard.db"
-
-def init_db():
-    """Initialize the SQLite database"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-                   CREATE TABLE IF NOT EXISTS sounds (
-                                                         id TEXT PRIMARY KEY,
-                                                         name TEXT NOT NULL,
-                                                         filename TEXT NOT NULL,
-                                                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                   )
-                   """)
-    conn.commit()
-    conn.close()
-
-@contextmanager
-def get_db():
-    """Context manager for database connections"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-# Initialize database on startup
-init_db()
-
 # ---------------------------------------------------------------------------
-# Redis / multi-pod connection tracking
+# Config
 # ---------------------------------------------------------------------------
-# `rooms` is now LOCAL to this pod only: room_id -> {conn_id: WebSocket}
-# Fan-out across pods happens through Redis pub/sub so that a sound played
-# on Pod A reaches a listener whose socket lives on Pod B.
-rooms: Dict[str, Dict[str, WebSocket]] = {}
 
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/soundboard")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-redis_client: Optional[redis.Redis] = None
-pubsub_task: Optional[asyncio.Task] = None
 
-# Security
-security = HTTPBearer()
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")  # MinIO endpoint
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+S3_BUCKET = os.getenv("S3_BUCKET", "soundboard-sounds")
+S3_REGION = os.getenv("S3_REGION", "us-east-1")
+
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
-
 if not ADMIN_TOKEN:
     raise ValueError("ADMIN_TOKEN environment variable is not set")
 
+security = HTTPBearer()
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify the bearer token"""
     if credentials.credentials != ADMIN_TOKEN:
         raise HTTPException(
             status_code=401,
@@ -90,20 +56,61 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         )
     return credentials.credentials
 
+# ---------------------------------------------------------------------------
+# Globals set up on startup
+# ---------------------------------------------------------------------------
+
+db_pool: Optional[asyncpg.Pool] = None
+redis_client: Optional[redis.Redis] = None
+pubsub_task: Optional[asyncio.Task] = None
+s3_session = aioboto3.Session()
+
+# Local (per-pod) websocket connections: room_id -> {conn_id: WebSocket}
+rooms: Dict[str, Dict[str, WebSocket]] = {}
+
+
+def get_s3_client():
+    return s3_session.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT_URL,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION,
+    )
+
+
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sounds (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+
+
+async def init_bucket():
+    async with get_s3_client() as s3:
+        try:
+            await s3.head_bucket(Bucket=S3_BUCKET)
+        except ClientError:
+            await s3.create_bucket(Bucket=S3_BUCKET)
+
 
 async def redis_listener():
-    """
-    Runs on every pod. Subscribes to all room channels and forwards
-    incoming events to whatever local websocket connections belong to
-    that room on THIS pod.
-    """
+    """Runs on every pod: fans out published events to LOCAL websocket connections."""
     pubsub = redis_client.pubsub()
     await pubsub.psubscribe("room:*")
     async for message in pubsub.listen():
         if message["type"] != "pmessage":
             continue
-        channel = message["channel"]  # e.g. "room:abc123"
-        room_id = channel.split(":", 1)[1]
+        room_id = message["channel"].split(":", 1)[1]
         try:
             payload = json.loads(message["data"])
         except (TypeError, ValueError):
@@ -126,7 +133,6 @@ async def redis_listener():
 
 
 async def publish_to_room(room_id: str, message: dict, exclude_conn_id: Optional[str] = None):
-    """Publish an event to Redis so every pod (including this one) fans it out."""
     await redis_client.publish(
         f"room:{room_id}",
         json.dumps({"message": message, "exclude_conn_id": exclude_conn_id}),
@@ -136,6 +142,8 @@ async def publish_to_room(room_id: str, message: dict, exclude_conn_id: Optional
 @app.on_event("startup")
 async def on_startup():
     global redis_client, pubsub_task
+    await init_db()
+    await init_bucket()
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     pubsub_task = asyncio.create_task(redis_listener())
 
@@ -146,146 +154,129 @@ async def on_shutdown():
         pubsub_task.cancel()
     if redis_client:
         await redis_client.close()
+    if db_pool:
+        await db_pool.close()
 
+
+# ---------------------------------------------------------------------------
+# REST API
+# ---------------------------------------------------------------------------
 
 @app.get("/api/sounds")
 async def get_sounds():
-    """Return all sounds metadata from database"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, name, filename FROM sounds ORDER BY created_at DESC")
-        sounds = [dict(row) for row in cursor.fetchall()]
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, filename FROM sounds ORDER BY created_at DESC"
+        )
+    return {"sounds": [dict(r) for r in rows]}
 
-    return {"sounds": sounds}
 
 @app.post("/api/sounds")
 async def upload_sound(
-        name: str = Form(...),
-        file: UploadFile = File(...),
-        token: str = Depends(verify_token)
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    token: str = Depends(verify_token),
 ):
-    """Upload a new sound file (requires authentication)"""
-
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith('audio/'):
+    if not file.content_type or not file.content_type.startswith("audio/"):
         raise HTTPException(status_code=400, detail="File must be an audio file")
 
-    # Get file extension
-    file_ext = Path(file.filename).suffix
-    if not file_ext:
-        file_ext = '.mp3'  # Default to mp3 if no extension
-
-    # Generate unique ID and filename
+    file_ext = Path(file.filename).suffix or ".mp3"
     sound_id = str(uuid.uuid4())
     filename = f"{sound_id}{file_ext}"
-    file_path = SOUNDS_DIR / filename
 
-    # Save file to disk
-    try:
-        contents = await file.read()
-        with open(file_path, 'wb') as f:
-            f.write(contents)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+    contents = await file.read()
 
-    # Save metadata to database
+    # Upload to S3/MinIO first
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO sounds (id, name, filename) VALUES (?, ?, ?)",
-                (sound_id, name, filename)
+        async with get_s3_client() as s3:
+            await s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=filename,
+                Body=contents,
+                ContentType=file.content_type,
             )
-            conn.commit()
     except Exception as e:
-        # Clean up file if database insert fails
-        if file_path.exists():
-            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=f"Failed to upload to storage: {str(e)}")
+
+    # Then save metadata to Postgres
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO sounds (id, name, filename, created_at) VALUES ($1, $2, $3, $4)",
+                sound_id, name, filename, datetime.utcnow(),
+            )
+    except Exception as e:
+        # Roll back the upload if DB insert fails
+        async with get_s3_client() as s3:
+            await s3.delete_object(Bucket=S3_BUCKET, Key=filename)
         raise HTTPException(status_code=500, detail=f"Failed to save to database: {str(e)}")
 
     return {
         "id": sound_id,
         "name": name,
         "filename": filename,
-        "message": "Sound uploaded successfully"
+        "message": "Sound uploaded successfully",
     }
+
 
 @app.delete("/api/sounds/{sound_id}")
 async def delete_sound(sound_id: str, token: str = Depends(verify_token)):
-    """Delete a sound (requires authentication)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # Get sound info
-        cursor.execute("SELECT filename FROM sounds WHERE id = ?", (sound_id,))
-        row = cursor.fetchone()
-
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT filename FROM sounds WHERE id = $1", sound_id)
         if not row:
             raise HTTPException(status_code=404, detail="Sound not found")
 
-        filename = row['filename']
+        await conn.execute("DELETE FROM sounds WHERE id = $1", sound_id)
 
-        # Delete from database
-        cursor.execute("DELETE FROM sounds WHERE id = ?", (sound_id,))
-        conn.commit()
-
-        # Delete file from disk
-        file_path = SOUNDS_DIR / filename
-        if file_path.exists():
-            os.remove(file_path)
+    async with get_s3_client() as s3:
+        await s3.delete_object(Bucket=S3_BUCKET, Key=row["filename"])
 
     return {"message": "Sound deleted successfully"}
 
+
 @app.get("/api/sounds/{sound_id}/audio")
 async def get_sound_audio(sound_id: str):
-    """Serve the actual audio file for a specific sound"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT filename FROM sounds WHERE id = ?", (sound_id,))
-        row = cursor.fetchone()
-
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT filename FROM sounds WHERE id = $1", sound_id)
     if not row:
         raise HTTPException(status_code=404, detail="Sound not found")
 
-    file_path = SOUNDS_DIR / row['filename']
+    try:
+        async with get_s3_client() as s3:
+            obj = await s3.get_object(Bucket=S3_BUCKET, Key=row["filename"])
+            body = await obj["Body"].read()
+    except ClientError:
+        raise HTTPException(status_code=404, detail="Audio file not found in storage")
 
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-
-    return FileResponse(
-        file_path,
+    return StreamingResponse(
+        iter([body]),
         media_type="audio/mpeg",
         headers={
             "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600"
-        }
+            "Cache-Control": "public, max-age=3600",
+        },
     )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
 
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
     await websocket.accept()
-
     conn_id = str(uuid.uuid4())
 
-    # Add connection to LOCAL room tracking for this pod
-    if room_id not in rooms:
-        rooms[room_id] = {}
-    rooms[room_id][conn_id] = websocket
+    rooms.setdefault(room_id, {})[conn_id] = websocket
 
-    # Track membership cluster-wide in Redis so user_count is accurate
-    # across all pods, not just this one.
     await redis_client.sadd(f"room_users:{room_id}", conn_id)
     count = await redis_client.scard(f"room_users:{room_id}")
-
     await publish_to_room(room_id, {"type": "user_count", "count": count})
 
     try:
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
-
-            # Broadcast sound to all users in room (across all pods),
-            # excluding the sender's own connection.
             if message.get("type") == "play_sound":
                 await publish_to_room(room_id, message, exclude_conn_id=conn_id)
 
