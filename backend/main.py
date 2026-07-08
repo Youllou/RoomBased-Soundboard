@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Dict, Set, Optional
+import asyncio
 import json
 import os
 import sqlite3
@@ -10,6 +11,7 @@ import uuid
 from pathlib import Path
 from contextlib import contextmanager
 from dotenv import load_dotenv
+import redis.asyncio as redis
 
 # Load environment variables
 load_dotenv()
@@ -59,8 +61,17 @@ def get_db():
 # Initialize database on startup
 init_db()
 
-# Store active connections per room
-rooms: Dict[str, Set[WebSocket]] = {}
+# ---------------------------------------------------------------------------
+# Redis / multi-pod connection tracking
+# ---------------------------------------------------------------------------
+# `rooms` is now LOCAL to this pod only: room_id -> {conn_id: WebSocket}
+# Fan-out across pods happens through Redis pub/sub so that a sound played
+# on Pod A reaches a listener whose socket lives on Pod B.
+rooms: Dict[str, Dict[str, WebSocket]] = {}
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_client: Optional[redis.Redis] = None
+pubsub_task: Optional[asyncio.Task] = None
 
 # Security
 security = HTTPBearer()
@@ -78,6 +89,64 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
             headers={"WWW-Authenticate": "Bearer"},
         )
     return credentials.credentials
+
+
+async def redis_listener():
+    """
+    Runs on every pod. Subscribes to all room channels and forwards
+    incoming events to whatever local websocket connections belong to
+    that room on THIS pod.
+    """
+    pubsub = redis_client.pubsub()
+    await pubsub.psubscribe("room:*")
+    async for message in pubsub.listen():
+        if message["type"] != "pmessage":
+            continue
+        channel = message["channel"]  # e.g. "room:abc123"
+        room_id = channel.split(":", 1)[1]
+        try:
+            payload = json.loads(message["data"])
+        except (TypeError, ValueError):
+            continue
+
+        data = payload["message"]
+        exclude_conn_id = payload.get("exclude_conn_id")
+
+        connections = rooms.get(room_id, {})
+        dead = []
+        for conn_id, ws in connections.items():
+            if conn_id == exclude_conn_id:
+                continue
+            try:
+                await ws.send_text(json.dumps(data))
+            except Exception:
+                dead.append(conn_id)
+        for conn_id in dead:
+            connections.pop(conn_id, None)
+
+
+async def publish_to_room(room_id: str, message: dict, exclude_conn_id: Optional[str] = None):
+    """Publish an event to Redis so every pod (including this one) fans it out."""
+    await redis_client.publish(
+        f"room:{room_id}",
+        json.dumps({"message": message, "exclude_conn_id": exclude_conn_id}),
+    )
+
+
+@app.on_event("startup")
+async def on_startup():
+    global redis_client, pubsub_task
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    pubsub_task = asyncio.create_task(redis_listener())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if pubsub_task:
+        pubsub_task.cancel()
+    if redis_client:
+        await redis_client.close()
+
 
 @app.get("/api/sounds")
 async def get_sounds():
@@ -196,44 +265,39 @@ async def get_sound_audio(sound_id: str):
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
     await websocket.accept()
 
-    # Add connection to room
-    if room_id not in rooms:
-        rooms[room_id] = set()
-    rooms[room_id].add(websocket)
+    conn_id = str(uuid.uuid4())
 
-    # Notify about user count
-    await broadcast_to_room(room_id, {
-        "type": "user_count",
-        "count": len(rooms[room_id])
-    })
+    # Add connection to LOCAL room tracking for this pod
+    if room_id not in rooms:
+        rooms[room_id] = {}
+    rooms[room_id][conn_id] = websocket
+
+    # Track membership cluster-wide in Redis so user_count is accurate
+    # across all pods, not just this one.
+    await redis_client.sadd(f"room_users:{room_id}", conn_id)
+    count = await redis_client.scard(f"room_users:{room_id}")
+
+    await publish_to_room(room_id, {"type": "user_count", "count": count})
 
     try:
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
 
-            # Broadcast sound to all users in room
+            # Broadcast sound to all users in room (across all pods),
+            # excluding the sender's own connection.
             if message.get("type") == "play_sound":
-                await broadcast_to_room(room_id, message, exclude=websocket)
+                await publish_to_room(room_id, message, exclude_conn_id=conn_id)
 
     except WebSocketDisconnect:
-        rooms[room_id].remove(websocket)
-        if len(rooms[room_id]) == 0:
+        rooms[room_id].pop(conn_id, None)
+        if not rooms[room_id]:
             del rooms[room_id]
-        else:
-            await broadcast_to_room(room_id, {
-                "type": "user_count",
-                "count": len(rooms[room_id])
-            })
 
-async def broadcast_to_room(room_id: str, message: dict, exclude: WebSocket = None):
-    if room_id in rooms:
-        for connection in rooms[room_id]:
-            if connection != exclude:
-                try:
-                    await connection.send_text(json.dumps(message))
-                except:
-                    pass
+        await redis_client.srem(f"room_users:{room_id}", conn_id)
+        count = await redis_client.scard(f"room_users:{room_id}")
+        await publish_to_room(room_id, {"type": "user_count", "count": count})
+
 
 if __name__ == "__main__":
     import uvicorn
