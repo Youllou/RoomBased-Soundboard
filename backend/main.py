@@ -18,7 +18,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +30,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -161,6 +166,10 @@ async def on_shutdown():
 # ---------------------------------------------------------------------------
 # REST API
 # ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
 
 @app.get("/api/sounds")
 async def get_sounds():
