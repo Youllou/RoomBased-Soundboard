@@ -18,9 +18,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(
-    docs_url="/api/docs",
-)
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
